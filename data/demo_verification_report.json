@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-10-26T19:38:57.051749+00:00",
+  "stages": {
+    "connection": {
+      "connected": true,
+      "is_mock": false,
+      "message": "Connected to MT5 Demo #81879914"
+    },
+    "account_verification": {
+      "login": 81879914,
+      "trade_mode": "DEMO",
+      "server": "Exness-MT5Trial10",
+      "balance": 50.0,
+      "equity": 43.35,
+      "is_demo_verified": true
+    },
+    "market_data": {
+      "raw_symbol": "EURUSD",
+      "resolved_symbol": "EURUSDm",
+      "bid": 1.11824,
+      "ask": 1.11832,
+      "spread_pips": 0.8,
+      "is_stale": false,
+      "tick_size": 1e-05,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    "candles": {
+      "candle_count": 10,
+      "latest_close": 1.11824,
+      "latest_time": 1793043000
+    },
+    "order_check": {
+      "passed": true,
+      "broker_comment": "Order check passed"
+    }
+  },
+  "overall_status": "PASSED_ALL_CHECKS"
+}

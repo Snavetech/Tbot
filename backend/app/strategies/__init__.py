@@ -1,0 +1,3 @@
+"""
+Adaptive strategy modules package
+"""

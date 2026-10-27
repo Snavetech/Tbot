@@ -1,0 +1,51 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Databases & logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+data/*.db
+data/*.sqlite
+
+# Environment & secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/node_modules/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Reports & Artifacts
+reports/generated/
+*.pdf
+*.csv
+!tests/fixtures/*.csv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
