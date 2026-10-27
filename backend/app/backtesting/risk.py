@@ -17,6 +17,7 @@ class RiskConfig:
     max_weekly_loss_pct: float = 3.0
     max_trades_per_day: int = 5
     consecutive_losses_limit: int = 3
+    consecutive_losses_reset_daily: bool = True  # If True, resets pause on 00:00 UTC day boundary
     contract_size: float = 100000.0  # 1 standard lot = 100,000 EUR
     pip_value_per_lot: float = 10.0   # USD per pip on EUR/USD standard lot
     min_volume: float = 0.01
@@ -31,6 +32,7 @@ class RiskConfig:
             "max_weekly_loss_pct": self.max_weekly_loss_pct,
             "max_trades_per_day": self.max_trades_per_day,
             "consecutive_losses_limit": self.consecutive_losses_limit,
+            "consecutive_losses_reset_daily": self.consecutive_losses_reset_daily,
             "contract_size": self.contract_size,
             "pip_value_per_lot": self.pip_value_per_lot,
             "min_volume": self.min_volume,
@@ -84,10 +86,20 @@ class BacktestRiskManager:
             self.current_day_str = day_str
             self.day_start_equity = current_equity
             self.trades_today = 0
-            # If lock was solely daily loss, reset upon new trading day
-            if self.is_locked and self.lock_reason and "Daily loss" in self.lock_reason:
-                self.is_locked = False
-                self.lock_reason = None
+            
+            # Reset daily loss lock or daily consecutive loss pause upon new trading day
+            if self.is_locked and self.lock_reason:
+                if "Daily loss" in self.lock_reason:
+                    self.is_locked = False
+                    self.lock_reason = None
+                elif self.config.consecutive_losses_reset_daily and (
+                    "consecutive" in self.lock_reason.lower() or "paused" in self.lock_reason.lower()
+                ):
+                    self.is_locked = False
+                    self.lock_reason = None
+                    self.consecutive_losses = 0
+            elif self.config.consecutive_losses_reset_daily:
+                self.consecutive_losses = 0
 
         # Week transition
         if self.current_week_str != week_str:

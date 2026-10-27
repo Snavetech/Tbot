@@ -9,6 +9,7 @@ Calculates technical indicators without future look-ahead bias:
 - Optional H1 higher-timeframe trend alignment (leakage-free resampled)
 """
 from typing import Optional, Tuple
+from pathlib import Path
 import pandas as pd
 import numpy as np
 
@@ -25,6 +26,8 @@ class FeaturePipeline:
     def calculate_features(
         cls,
         df_candles: pd.DataFrame,
+        df_h1: Optional[pd.DataFrame] = None,
+        h1_csv_path: Optional[str] = None,
         fast_ema_period: int = 50,
         slow_ema_period: int = 200,
         rsi_period: int = 14,
@@ -100,8 +103,23 @@ class FeaturePipeline:
         df["trend_direction"] = np.select(conditions, choices, default="FLAT")
 
         # 6. Optional Higher-Timeframe (H1) Trend Features
-        if include_h1_features and "time" in df.columns and len(df) >= 300:
-            df = cls._add_h1_features(df, fast_period=fast_ema_period, slow_period=slow_ema_period)
+        if include_h1_features and "time" in df.columns:
+            if df_h1 is not None and len(df_h1) > 0:
+                df = cls.align_h1_features(df, df_h1, fast_period=fast_ema_period, slow_period=slow_ema_period)
+            elif h1_csv_path and Path(h1_csv_path).exists():
+                from backend.app.backtesting.data_loader import HistoricalDataLoader
+                h1_loaded, _ = HistoricalDataLoader.load_from_csv(h1_csv_path)
+                df = cls.align_h1_features(df, h1_loaded, fast_period=fast_ema_period, slow_period=slow_ema_period)
+            elif Path("data/historical/EURUSD_H1.csv").exists():
+                from backend.app.backtesting.data_loader import HistoricalDataLoader
+                h1_loaded, _ = HistoricalDataLoader.load_from_csv("data/historical/EURUSD_H1.csv")
+                df = cls.align_h1_features(df, h1_loaded, fast_period=fast_ema_period, slow_period=slow_ema_period)
+            elif len(df) >= 300:
+                df = cls._add_h1_features_resampled(df, fast_period=fast_ema_period, slow_period=slow_ema_period)
+            else:
+                df["h1_trend_direction"] = "UNKNOWN"
+                df["h1_ema_50"] = np.nan
+                df["h1_ema_200"] = np.nan
         else:
             df["h1_trend_direction"] = "UNKNOWN"
             df["h1_ema_50"] = np.nan
@@ -114,29 +132,85 @@ class FeaturePipeline:
         return df
 
     @classmethod
-    def _add_h1_features(
+    def align_h1_features(
+        cls,
+        df_m15: pd.DataFrame,
+        df_h1: pd.DataFrame,
+        fast_period: int = 50,
+        slow_period: int = 200
+    ) -> pd.DataFrame:
+        """
+        Aligns authentic H1 historical candle data to M15 timeframe without look-ahead bias.
+        
+        Leakage Prevention Rules:
+        - In Forex/MT5 conventions, a 1-hour candle timestamp is its OPEN time T.
+        - That 1-hour candle spans [T, T + 3600) and closes at T + 3600.
+        - Its close price and indicators are finalized ONLY at T + 3600.
+        - Therefore, available_at_time = T + 3600.
+        - M15 candles at T_m15 use merge_asof(direction='backward'), guaranteeing that
+          any decision at T_m15 uses exclusively fully closed H1 candles (T_h1 + 3600 <= T_m15).
+        """
+        df = df_m15.copy()
+        h1 = df_h1.copy()
+
+        # Compute H1 indicators
+        h1_close = h1["close"].astype(float)
+        h1["h1_ema_50"] = h1_close.ewm(span=fast_period, adjust=False).mean()
+        h1["h1_ema_200"] = h1_close.ewm(span=slow_period, adjust=False).mean()
+        
+        diff = h1["h1_ema_50"] - h1["h1_ema_200"]
+        threshold = 0.00005  # 0.5 pip
+        h1["h1_trend_direction"] = np.where(diff > threshold, "UP", np.where(diff < -threshold, "DOWN", "FLAT"))
+
+        # Earliest time this closed H1 bar's data is available to subsequent candles
+        h1["available_at_time"] = h1["time"].astype("int64") + 3600
+
+        h1_cols = ["available_at_time", "h1_ema_50", "h1_ema_200", "h1_trend_direction"]
+        h1_subset = h1[h1_cols].sort_values("available_at_time")
+
+        # Drop any existing h1 columns to avoid suffix collisions
+        df = df.drop(columns=[c for c in df.columns if c in {"h1_ema_50", "h1_ema_200", "h1_trend_direction"}], errors="ignore")
+
+        # Merge backward
+        merged = pd.merge_asof(
+            df.sort_values("time"),
+            h1_subset,
+            left_on="time",
+            right_on="available_at_time",
+            direction="backward"
+        )
+        merged["h1_trend_direction"] = merged["h1_trend_direction"].fillna("UNKNOWN")
+        if "available_at_time" in merged.columns:
+            merged = merged.drop(columns=["available_at_time"])
+
+        return merged
+
+    @classmethod
+    def _add_h1_features_resampled(
         cls,
         df: pd.DataFrame,
         fast_period: int = 50,
         slow_period: int = 200
     ) -> pd.DataFrame:
         """
-        Resamples M15 candles to H1, calculates H1 indicators, and maps back to M15
-        using STRICT forward-shift to guarantee ZERO future leakage.
+        Fallback: Resamples M15 candles to H1 when independent H1 CSV is not supplied,
+        using strict 3600-second forward-shift to eliminate future leakage.
         """
-        # Create datetime index for resampling
         temp = df.copy()
         temp["dt"] = pd.to_datetime(temp["time"], unit="s", utc=True)
         temp = temp.set_index("dt")
 
-        # Resample to 1-Hour candles
-        h1 = temp.resample("1h").agg({
+        vol_col = "tick_volume" if "tick_volume" in temp.columns else ("volume" if "volume" in temp.columns else None)
+        agg_dict = {
             "open": "first",
             "high": "max",
             "low": "min",
-            "close": "last",
-            "volume": "sum"
-        }).dropna()
+            "close": "last"
+        }
+        if vol_col:
+            agg_dict[vol_col] = "sum"
+
+        h1 = temp.resample("1h").agg(agg_dict).dropna()
 
         if len(h1) < slow_period:
             df["h1_trend_direction"] = "UNKNOWN"
@@ -147,18 +221,15 @@ class FeaturePipeline:
         # Compute H1 indicators
         h1["h1_ema_50"] = h1["close"].ewm(span=fast_period, adjust=False).mean()
         h1["h1_ema_200"] = h1["close"].ewm(span=slow_period, adjust=False).mean()
-        h1["h1_trend"] = np.where(h1["h1_ema_50"] > h1["h1_ema_200"], "UP", "DOWN")
+        diff = h1["h1_ema_50"] - h1["h1_ema_200"]
+        h1["h1_trend"] = np.where(diff > 0.00005, "UP", np.where(diff < -0.00005, "DOWN", "FLAT"))
 
-        # CRITICAL LEAKAGE PREVENTION:
-        # An H1 candle spanning 10:00 to 11:00 closes at 11:00.
-        # Its features become available ONLY for M15 candles opening at 11:00 or later!
-        # Therefore, shift H1 features forward by 1 hour (1 period)
+        # Shift forward by 1 hour (available at close)
         h1_shifted = h1[["h1_ema_50", "h1_ema_200", "h1_trend"]].shift(1)
 
-        # Merge back onto M15 datetime index using merge_asof backward
         temp_reset = temp.reset_index()
         h1_reset = h1_shifted.reset_index().rename(columns={"dt": "h1_dt"})
-        
+
         merged = pd.merge_asof(
             temp_reset.sort_values("dt"),
             h1_reset.sort_values("h1_dt"),

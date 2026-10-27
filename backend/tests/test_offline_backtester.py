@@ -391,3 +391,132 @@ def test_backtester_never_invokes_broker(synthetic_m15_series, monkeypatch):
     # Must complete safely without calling mock_order_send
     res = engine.run(df_feat)
     assert "trades" in res
+
+
+# 16. Regression Test: Daily Reset vs Permanent Lock for Consecutive Losses
+def test_consecutive_losses_reset_daily_vs_permanent():
+    """
+    Validates that consecutive loss lock can either:
+    1) Pause trading for the day and reset at 00:00 UTC (consecutive_losses_reset_daily=True)
+    2) Permanently halt trading across subsequent days (consecutive_losses_reset_daily=False)
+    """
+    # Case A: Daily Reset
+    mgr_daily = BacktestRiskManager(RiskConfig(consecutive_losses_limit=3, consecutive_losses_reset_daily=True))
+    mgr_daily.reset(10000.0)
+    
+    t_day1 = int(datetime(2025, 5, 1, 14, 0, tzinfo=timezone.utc).timestamp())
+    t_day2 = int(datetime(2025, 5, 2, 8, 0, tzinfo=timezone.utc).timestamp())
+
+    mgr_daily.update_calendar_baselines(t_day1, 10000.0)
+    for _ in range(3):
+        mgr_daily.record_trade_result(-25.0)
+    
+    assert mgr_daily.is_locked == True
+    assert mgr_daily.consecutive_losses == 3
+    allowed, _ = mgr_daily.check_trade_allowed(10000.0)
+    assert allowed == False
+
+    # Day 2 transition
+    mgr_daily.update_calendar_baselines(t_day2, 9925.0)
+    assert mgr_daily.is_locked == False
+    assert mgr_daily.consecutive_losses == 0
+    allowed_day2, _ = mgr_daily.check_trade_allowed(9925.0)
+    assert allowed_day2 == True
+
+    # Case B: Permanent Lock
+    mgr_perm = BacktestRiskManager(RiskConfig(consecutive_losses_limit=3, consecutive_losses_reset_daily=False))
+    mgr_perm.reset(10000.0)
+    mgr_perm.update_calendar_baselines(t_day1, 10000.0)
+    for _ in range(3):
+        mgr_perm.record_trade_result(-25.0)
+    
+    assert mgr_perm.is_locked == True
+    # Day 2 transition must NOT clear permanent lock
+    mgr_perm.update_calendar_baselines(t_day2, 9925.0)
+    assert mgr_perm.is_locked == True
+    assert mgr_perm.consecutive_losses == 3
+    allowed_perm, reason = mgr_perm.check_trade_allowed(9925.0)
+    assert allowed_perm == False
+    assert "Risk locked" in reason
+
+
+# 17. Regression Test: H1 Trend Alignment Zero Look-Ahead Bias
+def test_h1_alignment_zero_lookahead_bias():
+    """
+    Guarantees that M15 decisions at time T use exclusively H1 candles that fully closed
+    at or before time T. An H1 candle opening at T cannot be visible until T + 3600.
+    """
+    # Deterministic H1 bars (09:00, 10:00, 11:00 UTC on 2025-06-01)
+    base_t = int(datetime(2025, 6, 1, 9, 0, tzinfo=timezone.utc).timestamp())
+    h1_records = [
+        {"time": base_t, "open": 1.0500, "high": 1.0550, "low": 1.0490, "close": 1.0540, "tick_volume": 1000, "spread": 8.0},
+        {"time": base_t + 3600, "open": 1.0540, "high": 1.0545, "low": 1.0420, "close": 1.0430, "tick_volume": 1200, "spread": 8.0},
+        {"time": base_t + 7200, "open": 1.0430, "high": 1.0600, "low": 1.0425, "close": 1.0590, "tick_volume": 1500, "spread": 8.0},
+    ]
+    df_h1 = pd.DataFrame(h1_records)
+
+    # Deterministic M15 bars covering 10:00 to 11:30 UTC
+    m15_records = []
+    for step in range(4, 11):  # 10:00, 10:15, 10:30, 10:45, 11:00, 11:15, 11:30
+        m15_t = base_t + (step * 900)
+        m15_records.append({
+            "time": m15_t, "open": 1.0500, "high": 1.0520, "low": 1.0490, "close": 1.0510,
+            "tick_volume": 200, "spread": 0.8
+        })
+    df_m15 = pd.DataFrame(m15_records)
+
+    # Force known EMA/trend for H1 bars: bar 0 = UP, bar 1 = DOWN, bar 2 = UP
+    # We test via align_h1_features
+    df_aligned = FeaturePipeline.align_h1_features(df_m15, df_h1, fast_period=2, slow_period=3)
+
+    # Check timestamps:
+    # M15 at 10:00 (step 4, base_t + 3600): H1 bar 0 (09:00) closed at 10:00.
+    # Must use H1 bar 0!
+    m15_1000 = df_aligned[df_aligned["time"] == base_t + 3600].iloc[0]
+    m15_1045 = df_aligned[df_aligned["time"] == base_t + 4500].iloc[0]
+    assert m15_1000["h1_trend_direction"] in {"UP", "DOWN", "FLAT"}
+    assert m15_1000["h1_trend_direction"] == m15_1045["h1_trend_direction"]
+
+    # M15 at 11:00 (step 8, base_t + 7200): H1 bar 1 (10:00) closed at 11:00.
+    # Must transition to H1 bar 1!
+    m15_1100 = df_aligned[df_aligned["time"] == base_t + 7200].iloc[0]
+    # In H1 bar 1, price plunged from 1.0540 to 1.0430, so fast EMA is below slow EMA -> DOWN
+    assert m15_1100["h1_trend_direction"] == "DOWN"
+    # M15 at 10:45 must NOT see H1 bar 1
+    assert m15_1045["h1_trend_direction"] != "DOWN"
+
+
+# 18. Regression Test: Transaction Cost Friction Without Double-Counting
+def test_transaction_cost_zero_double_counting():
+    """
+    Confirms that spread is applied exactly once round-turn (split 50/50 on entry/exit),
+    commission is deducted separately without polluting price points, and slippage is applied correctly.
+    """
+    cost_cfg = CostModelConfig(
+        default_spread_pips=1.0,
+        commission_per_lot_round_turn=7.00,
+        slippage_pips=0.2
+    )
+    cost_model = TransactionCostModel(cost_cfg)
+
+    # BUY Entry at Open 1.05000:
+    # Ask = Open + (Spread / 2) + Slippage = 1.05000 + 0.00005 + 0.00002 = 1.05007
+    exec_entry, spread_used, slip_used = cost_model.get_execution_entry_price("BUY", 1.05000, 1.0)
+    assert exec_entry == 1.05007
+
+    # BUY Stop Loss Exit at Target 1.04900 (Market Order):
+    # Bid = Target - (Spread / 2) - Slippage = 1.04900 - 0.00005 - 0.00002 = 1.04893
+    exec_exit, exit_spread, exit_slip = cost_model.get_execution_exit_price("BUY", 1.04900, is_stop_loss=True, bar_spread_pips=1.0)
+    assert exec_exit == 1.04893
+
+    # Total price friction:
+    # Gross pip loss = (1.05007 - 1.04893) / 0.0001 = 11.4 pips
+    # Breakdown: 10 pips nominal move + 1.0 pip full round-turn spread + 0.4 pip adverse slippage (entry + exit)
+    # Exactly 1.0 pip spread is paid, ZERO double-counting!
+    total_loss_pips = round((exec_entry - exec_exit) / 0.0001, 1)
+    assert total_loss_pips == 11.4
+
+    # Commission check on 0.10 lot
+    comm = cost_model.calculate_commission(0.10)
+    assert comm == 0.70  # Exactly $0.70 flat, separate from price
+
