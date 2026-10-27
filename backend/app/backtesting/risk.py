@@ -87,19 +87,29 @@ class BacktestRiskManager:
             self.day_start_equity = current_equity
             self.trades_today = 0
             
-            # Reset daily loss lock or daily consecutive loss pause upon new trading day
-            if self.is_locked and self.lock_reason:
-                if "Daily loss" in self.lock_reason:
-                    self.is_locked = False
-                    self.lock_reason = None
-                elif self.config.consecutive_losses_reset_daily and (
-                    "consecutive" in self.lock_reason.lower() or "paused" in self.lock_reason.lower()
-                ):
-                    self.is_locked = False
-                    self.lock_reason = None
+            # Check if Weekly loss limit is currently breached before unlocking daily states
+            weekly_breached = False
+            if self.week_start_equity > 0:
+                w_loss_pct = ((self.week_start_equity - current_equity) / self.week_start_equity) * 100.0
+                if w_loss_pct >= self.config.max_weekly_loss_pct:
+                    weekly_breached = True
+                    self.is_locked = True
+                    self.lock_reason = f"Weekly loss limit reached: {w_loss_pct:.2f}% >= {self.config.max_weekly_loss_pct}%"
+
+            if not weekly_breached:
+                # Reset daily loss lock or daily consecutive loss pause upon new trading day
+                if self.is_locked and self.lock_reason:
+                    if "Daily loss" in self.lock_reason:
+                        self.is_locked = False
+                        self.lock_reason = None
+                    elif self.config.consecutive_losses_reset_daily and (
+                        "consecutive" in self.lock_reason.lower() or "paused" in self.lock_reason.lower()
+                    ):
+                        self.is_locked = False
+                        self.lock_reason = None
+                        self.consecutive_losses = 0
+                elif self.config.consecutive_losses_reset_daily:
                     self.consecutive_losses = 0
-            elif self.config.consecutive_losses_reset_daily:
-                self.consecutive_losses = 0
 
         # Week transition
         if self.current_week_str != week_str:
@@ -108,6 +118,7 @@ class BacktestRiskManager:
             if self.is_locked and self.lock_reason and "Weekly loss" in self.lock_reason:
                 self.is_locked = False
                 self.lock_reason = None
+
 
     def calculate_lot_size(
         self,
