@@ -279,8 +279,12 @@ class HistoricalDataLoader:
             # If spread values are in broker raw points (> 5.0 for EURUSD), convert to pips
             if df["spread"].dropna().median() > 5.0:
                 df["spread"] = df["spread"] / 10.0
-            # Fill missing spread with default
-            df["spread"] = df["spread"].fillna(default_spread_pips)
+            # Replace missing or non-positive spreads (e.g. unrecorded broker historical bars) with default
+            zero_or_na = df["spread"].isna() | (df["spread"] <= 0)
+            zero_count = int(zero_or_na.sum())
+            if zero_count > 0:
+                df.loc[zero_or_na, "spread"] = default_spread_pips
+                warnings.append(f"Replaced {zero_count} unrecorded or zero spread candles with default assumption of {default_spread_pips:.1f} pips.")
         else:
             df["spread"] = default_spread_pips
             warnings.append(f"Historical spread column absent. Using documented default spread assumption of {default_spread_pips:.1f} pips.")
