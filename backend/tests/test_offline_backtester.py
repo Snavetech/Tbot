@@ -9,6 +9,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
+from pathlib import Path
 
 from backend.app.backtesting import (
     HistoricalDataLoader,
@@ -193,32 +194,39 @@ def test_transaction_cost_calculations():
 # 7. Conservative Intrabar Collision Handling
 def test_conservative_collision_handling():
     """When both SL and TP price levels are within candle range, SL triggers first."""
-    # Create 3 candles:
-    # Bar 0 & 1: warm-up / setup
-    # Bar 2: Enters BUY at 1.0800, SL at 1.0770, TP at 1.0860
-    # Bar 3: Extreme candle that sweeps both SL and TP: High 1.0900, Low 1.0700
-    df = pd.DataFrame({
-        "time": [1000, 1900, 2800],
-        "open": [1.0800, 1.0800, 1.0800],
-        "high": [1.0820, 1.0820, 1.0900],  # 1.0900 > TP (1.0860)
-        "low": [1.0790, 1.0790, 1.0700],   # 1.0700 < SL (1.0770)
-        "close": [1.0810, 1.0810, 1.0850],
-        "volume": [100.0, 100.0, 100.0],
-        "spread": [1.2, 1.2, 1.2],
-        "ema_50": [1.0700, 1.0700, 1.0700],
-        "ema_200": [1.0600, 1.0600, 1.0600],
-        "rsi_14": [60.0, 60.0, 60.0],
-        "atr_14": [0.0020, 0.0020, 0.0020],
-        "is_warmup": [False, False, False]
-    })
+    rows = []
+    for i in range(60):
+        open_p = 1.0800
+        close_p = 1.0810
+        high_p = 1.0820
+        low_p = 1.0790
+        # Bar 52 is extreme candle sweeping both SL and TP
+        if i == 52:
+            high_p = 1.0950  # > TP
+            low_p = 1.0650   # < SL
+        rows.append({
+            "time": 1000 + (i * 900),
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
+            "close": close_p,
+            "volume": 100.0,
+            "spread": 1.2,
+            "ema_50": 1.0700,
+            "ema_200": 1.0600,
+            "rsi_14": 60.0,
+            "atr_14": 0.0020,
+            "is_warmup": False
+        })
+    df = pd.DataFrame(rows)
 
     engine = OfflineBacktestEngine(initial_balance=10000.0)
     res = engine.run(df)
 
-    if res["trades"]:
-        collision_trades = [t for t in res["trades"] if t["exit_reason"] == "COLLISION_STOP_LOSS"]
-        assert len(collision_trades) > 0
-        assert collision_trades[0]["net_pnl"] < 0
+    assert len(res["trades"]) > 0
+    collision_trades = [t for t in res["trades"] if t["exit_reason"] == "COLLISION_STOP_LOSS"]
+    assert len(collision_trades) > 0
+    assert collision_trades[0]["net_pnl"] < 0
 
 
 # 8. Deterministic Position Sizing (0.25% Equity Risk)

@@ -63,8 +63,10 @@ class FeaturePipeline:
 
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100.0 - (100.0 / (1.0 + rs))
-        # Handle zero-loss edge case (RSI = 100) and zero-gain edge case (RSI = 0)
-        rsi = rsi.fillna(np.where(avg_gain > 0, 100.0, 50.0))
+        # Handle zero-loss edge case (RSI = 100) and zero-gain edge case (RSI = 50)
+        zero_loss_mask = (avg_loss == 0)
+        rsi = rsi.where(~(zero_loss_mask & (avg_gain > 0)), 100.0)
+        rsi = rsi.where(~(zero_loss_mask & (avg_gain == 0)), 50.0)
         df["rsi_14"] = rsi
 
         # 3. Average True Range (ATR 14)

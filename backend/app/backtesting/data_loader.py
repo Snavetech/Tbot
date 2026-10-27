@@ -202,7 +202,7 @@ class HistoricalDataLoader:
             )
 
         # Store standardized integer timestamp in seconds
-        df["time"] = df["datetime"].astype("int64") // 10**9
+        df["time"] = (df["datetime"] - pd.Timestamp("1970-01-01", tz="UTC")).dt.total_seconds().astype("int64")
 
         # 3. Sort chronologically
         is_sorted = df["time"].is_monotonic_increasing
